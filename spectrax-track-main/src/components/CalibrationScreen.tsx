@@ -1,0 +1,203 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { cameraService } from '../services/cameraService';
+import { poseService } from '../services/poseService';
+import { overlayRenderer } from '../services/overlayRenderer';
+import { calibrationLogic, CalibrationResult } from '../services/calibrationLogic';
+import { Camera, ArrowRight, AlertCircle, Dumbbell } from 'lucide-react';
+import { ExerciseConfig, exercises } from '../config/exercises';
+
+interface CalibrationScreenProps {
+  selectedExercise: ExerciseConfig;
+  onSelectExercise: (key: string) => void;
+  onNext: () => void;
+  onBack: () => void;
+}
+
+export const CalibrationScreen: React.FC<CalibrationScreenProps> = ({ 
+  selectedExercise, onSelectExercise, onNext, onBack 
+}) => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [result, setResult] = useState<CalibrationResult>({
+    status: 'red',
+    message: 'Initializing system...',
+    isReady: false,
+  });
+  const [error, setError] = useState<string | null>(null);
+  
+  const frameId = useRef<number>(0);
+  const lastProcessTime = useRef<number>(0);
+  const FPS_LIMIT = 15;
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const startSystem = async () => {
+      if (!videoRef.current || !canvasRef.current) return;
+
+      try {
+        setResult(prev => ({ ...prev, message: 'Warming up AI Engine...' }));
+        
+        const ctx = canvasRef.current.getContext('2d');
+        if (ctx) overlayRenderer.setContext(ctx);
+
+        await cameraService.startCamera(videoRef.current);
+        
+        poseService.onResults((results) => {
+          if (!isMounted) return;
+          const evaluation = calibrationLogic.evaluate(results);
+          setResult(evaluation);
+          
+          // Use primary joints from selected exercise for highlighting
+          const primaryJoints = selectedExercise.joints?.flat() || [];
+          overlayRenderer.draw(results, evaluation.status, primaryJoints);
+        });
+
+        const processLoop = (timestamp: number) => {
+          if (!isMounted) return;
+          const elapsed = timestamp - lastProcessTime.current;
+          if (elapsed > (1000 / FPS_LIMIT)) {
+            if (videoRef.current && videoRef.current.readyState >= 2 && !videoRef.current.paused) {
+              poseService.send(videoRef.current);
+            }
+            lastProcessTime.current = timestamp;
+          }
+          frameId.current = requestAnimationFrame(processLoop);
+        };
+        frameId.current = requestAnimationFrame(processLoop);
+      } catch (err) {
+        if (isMounted) {
+          setError("Hardware synchronization error. Verify camera and refresh.");
+          setResult(prev => ({ ...prev, status: 'red', message: 'Sync failed' }));
+        }
+      }
+    };
+
+    startSystem();
+
+    return () => {
+      isMounted = false;
+      cancelAnimationFrame(frameId.current);
+      cameraService.stopCamera();
+    };
+  }, [selectedExercise]);
+
+  const statusColor = result.status === 'green' ? 'var(--neon-green)' : (result.status === 'yellow' ? 'var(--neon-yellow)' : 'var(--neon-red)');
+
+  return (
+    <div className="screen-container" style={{ background: 'var(--bg-primary)' }}>
+      <div className="camera-viewport" style={{ 
+        position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: 'radial-gradient(circle at center, #111a3d 0%, #0a0a1a 100%)'
+      }}>
+        <video 
+          ref={videoRef} 
+          playsInline 
+          muted 
+          style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: 0.6, transform: 'scaleX(-1)' }} 
+        />
+        <canvas 
+          ref={canvasRef} 
+          width={1280}
+          height={720}
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none', transform: 'scaleX(-1)' }} 
+        />
+      </div>
+
+      <div className="ui-layer" style={{ position: 'relative', zIndex: 10, height: '100%', padding: '40px', pointerEvents: 'none', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+        
+        {/* Header & Exercise Selector */}
+        <div className="animate-in" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', pointerEvents: 'all' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+            <div className="glass" style={{ padding: '12px', borderRadius: '12px' }}>
+              <Camera color="var(--neon-cyan)" size={24} />
+            </div>
+            <div>
+              <h2 style={{ fontFamily: 'var(--font-heading)', color: 'var(--neon-cyan)', fontSize: '1.2rem', letterSpacing: '2px' }}>SYSTEM CALIBRATION</h2>
+              <p style={{ color: 'var(--text-dim)', fontSize: '0.75rem', letterSpacing: '1px' }}>VERSION 2.5.0 — MULTI-ENGINE ACTIVE</p>
+            </div>
+          </div>
+
+          <div className="glass" style={{ padding: '16px', minWidth: '240px' }}>
+             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
+                <Dumbbell size={14} color="var(--neon-purple)" />
+                <span style={{ fontSize: '0.65rem', color: 'var(--text-dim)', letterSpacing: '2px', textTransform: 'uppercase' }}>Select Exercise</span>
+             </div>
+             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {Object.values(exercises).map((ex) => (
+                  <button 
+                    key={ex.key}
+                    onClick={() => onSelectExercise(ex.key)}
+                    style={{
+                      background: selectedExercise.key === ex.key ? 'var(--neon-purple)' : 'transparent',
+                      color: selectedExercise.key === ex.key ? '#fff' : 'var(--text-secondary)',
+                      padding: '8px 12px',
+                      borderRadius: '8px',
+                      fontSize: '0.75rem',
+                      fontWeight: 600,
+                      border: '1px solid rgba(168, 85, 247, 0.3)',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      transition: 'all 0.3s ease'
+                    }}
+                  >
+                    {ex.name.toUpperCase()}
+                  </button>
+                ))}
+             </div>
+          </div>
+        </div>
+
+        {/* Center Feedback Area */}
+        <div style={{ alignSelf: 'center', textAlign: 'center' }}>
+          {error ? (
+            <div className="glass animate-in" style={{ padding: '32px 48px', border: '1px solid var(--neon-red)', background: 'rgba(255, 59, 92, 0.1)', maxWidth: '500px', pointerEvents: 'all' }}>
+              <AlertCircle color="var(--neon-red)" size={48} style={{ marginBottom: '16px', margin: '0 auto' }} />
+              <h3 style={{ fontFamily: 'var(--font-heading)', color: 'var(--neon-red)', marginBottom: '8px' }}>HARDWARE SYNC FAILED</h3>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', lineHeight: 1.5 }}>{error}</p>
+              <button onClick={() => window.location.reload()} className="btn-outline" style={{ marginTop: '24px', borderColor: 'var(--neon-red)', color: 'var(--neon-red)' }}>REINITIALIZE</button>
+            </div>
+          ) : (
+            <div className="glass animate-in" style={{ padding: '24px 40px', border: `1px solid ${statusColor}`, background: 'rgba(13, 17, 39, 0.9)', minWidth: '400px' }}>
+               <p style={{ fontFamily: 'var(--font-heading)', fontSize: '1.4rem', color: statusColor, letterSpacing: '4px', textShadow: `0 0 15px ${statusColor}44` }}>
+                {result.message.toUpperCase()}
+               </p>
+               <div style={{ height: '2px', background: 'rgba(255,255,255,0.05)', margin: '16px 0', position: 'relative', overflow: 'hidden' }}>
+                  <div style={{ position: 'absolute', inset: 0, width: result.isReady ? '100%' : '40%', background: statusColor, transition: 'width 0.5s ease', boxShadow: `0 0 10px ${statusColor}` }} />
+               </div>
+               <p style={{ fontSize: '0.65rem', color: 'var(--text-dim)', letterSpacing: '2px' }}>
+                 {result.isReady ? 'OPTIMAL POSITION ACHIEVED' : 'ACQUIRING BODY LANDMARKS...'}
+               </p>
+            </div>
+          )}
+        </div>
+
+        {/* Bottom Controls */}
+        <div className="animate-in" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', pointerEvents: 'all' }}>
+          <button onClick={onBack} className="btn-outline">CANCEL</button>
+          <div className="glass" style={{ padding: '20px', minWidth: '300px', display: 'flex', alignItems: 'center', gap: '20px' }}>
+            <div style={{ position: 'relative', width: '12px', height: '12px' }}>
+                <div style={{ position: 'absolute', inset: 0, borderRadius: '50%', background: statusColor, boxShadow: `0 0 10px ${statusColor}` }} />
+            </div>
+            <div style={{ flex: 1 }}>
+                <div style={{ fontSize: '0.65rem', color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '1.5px' }}>{selectedExercise.name} mode</div>
+                <div style={{ color: statusColor, fontWeight: 700, fontSize: '0.85rem' }}>{result.isReady ? 'READY TO START' : 'SCANNING BODY...'}</div>
+            </div>
+            <button onClick={onNext} disabled={!result.isReady} className="btn-neon" style={{ padding: '12px 24px', fontSize: '0.75rem' }}>
+              START ANALYSIS <ArrowRight size={16} />
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+      <style>{`
+        @keyframes pulse {
+          0% { opacity: 0.4; transform: scale(0.9); }
+          50% { opacity: 1; transform: scale(1.1); }
+          100% { opacity: 0.4; transform: scale(0.9); }
+        }
+      `}</style>
+    </div>
+  );
+};
